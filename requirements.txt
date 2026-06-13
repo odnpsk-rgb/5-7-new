@@ -3,6 +3,10 @@
 # OpenAI API клиент для работы с LLM и эмбеддингами
 openai>=1.12.0
 
+# SOCKS-прокси для VPN (httpx по умолчанию не поддерживает socks4/socks5)
+httpx[socks]>=0.27.0
+socksio>=1.0.0
+
 # ChromaDB для локального векторного хранилища
 chromadb>=0.4.22
 

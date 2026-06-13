@@ -7,10 +7,11 @@
 
 import chromadb
 from chromadb.config import Settings
-from openai import OpenAI
 from typing import List, Tuple
 import os
 from pathlib import Path
+
+from openai_client import create_openai_client
 
 
 class EmbeddingStore:
@@ -50,7 +51,7 @@ class EmbeddingStore:
         
         # Инициализируем клиент OpenAI для создания эмбеддингов
         # API ключ берется из параметра или переменной окружения OPENAI_API_KEY
-        self.openai_client = OpenAI(api_key=api_key or os.getenv("OPENAI_API_KEY"))
+        self.openai_client = create_openai_client(api_key)
         self.embedding_model = embedding_model
         
         print(f"Модель эмбеддингов: {embedding_model} (OpenAI API)")

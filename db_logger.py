@@ -65,9 +65,50 @@ class DatabaseLogger:
         cursor.execute("""
             CREATE INDEX IF NOT EXISTS idx_source ON logs(source)
         """)
+
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS telegram_dialog_counts (
+                user_id TEXT PRIMARY KEY,
+                message_count INTEGER NOT NULL DEFAULT 0
+            )
+        """)
         
         conn.commit()
         conn.close()
+    
+    def get_telegram_dialog_count(self, user_id: str) -> int:
+        """Возвращает число обработанных сообщений пользователя в Telegram."""
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+        cursor.execute(
+            "SELECT message_count FROM telegram_dialog_counts WHERE user_id = ?",
+            (user_id,),
+        )
+        row = cursor.fetchone()
+        conn.close()
+        return row[0] if row else 0
+
+    def increment_telegram_dialog_count(self, user_id: str) -> int:
+        """Увеличивает счётчик сообщений пользователя и возвращает новое значение."""
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+        cursor.execute(
+            """
+            INSERT INTO telegram_dialog_counts (user_id, message_count)
+            VALUES (?, 1)
+            ON CONFLICT(user_id) DO UPDATE SET
+                message_count = message_count + 1
+            """,
+            (user_id,),
+        )
+        cursor.execute(
+            "SELECT message_count FROM telegram_dialog_counts WHERE user_id = ?",
+            (user_id,),
+        )
+        count = cursor.fetchone()[0]
+        conn.commit()
+        conn.close()
+        return count
     
     def log_interaction(
         self,

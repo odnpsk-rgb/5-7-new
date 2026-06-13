@@ -6,8 +6,63 @@ RAG объединяет поиск релевантной информации 
 """
 
 from typing import List, Tuple, Optional
-from openai import OpenAI
+import html
 import os
+from urllib.parse import quote
+
+from openai_client import create_openai_client
+
+# Названия документов базы знаний (ключ = имя txt-файла без расширения)
+DOCUMENT_TITLES = {
+    "poli": "СП 29.13330.2011 «Полы»",
+    "organizacia stroitelstva": "СП 48.13330.2011 «Организация строительства»",
+    "ograzhdausie konstrukcii": "СП 70.13330.2012 «Несущие и ограждающие конструкции»",
+}
+
+
+def format_source_references(
+    search_results: List[Tuple[str, str, float]],
+    html: bool = False,
+) -> str:
+    """
+    Форматирует список источников для ответа пользователю.
+
+    Если задана переменная DOCS_BASE_URL, добавляет кликабельные ссылки на файлы.
+    """
+    if not search_results:
+        return ""
+
+    base_url = os.getenv("DOCS_BASE_URL", "").rstrip("/")
+    lines = ["📚 Источники:"]
+    seen = set()
+
+    for chunk_text, source, distance in search_results:
+        if source in seen:
+            continue
+        seen.add(source)
+
+        title = DOCUMENT_TITLES.get(source, source.replace("_", " "))
+        relevance = max(0, min(100, int((1 - distance) * 100)))
+        snippet = " ".join(chunk_text.split())[:120]
+        if len(chunk_text) > 120:
+            snippet += "…"
+        filename = f"{source}.txt"
+
+        if base_url and html:
+            url = f"{base_url}/{quote(filename)}"
+            lines.append(
+                f'• <a href="{url}">{html.escape(title)}</a> ({relevance}%)\n'
+                f"  <i>{html.escape(snippet)}</i>"
+            )
+        elif base_url:
+            url = f"{base_url}/{quote(filename)}"
+            lines.append(f"• {title} ({relevance}%)\n  {url}\n  «{snippet}»")
+        else:
+            lines.append(
+                f"• {title} — docs/{filename} ({relevance}%)\n  «{snippet}»"
+            )
+
+    return "\n".join(lines)
 
 
 class RAGAssistant:
@@ -44,7 +99,7 @@ class RAGAssistant:
         
         # Инициализируем клиент OpenAI
         # API ключ берется из параметра или переменной окружения OPENAI_API_KEY
-        self.client = OpenAI(api_key=api_key or os.getenv("OPENAI_API_KEY"))
+        self.client = create_openai_client(api_key)
         
         print(f"✓ RAG-ассистент инициализирован (модель: {model})")
     

@@ -16,9 +16,17 @@ from telegram.ext import (
     filters,
     ContextTypes
 )
-from rag import RAGAssistant
+from rag import RAGAssistant, format_source_references
 from cache import ResponseCache
 from db_logger import DatabaseLogger
+from http_proxy import get_proxy_url
+from telegram.request import HTTPXRequest
+from telegram.constants import ParseMode
+
+DEMO_MESSAGE_LIMIT = 4
+DEMO_LIMIT_MESSAGE = (
+    "Демо-режим: 4 сообщения. Для открытия доступа свяжитесь с администратором."
+)
 
 
 class TelegramRAGBot:
@@ -49,8 +57,25 @@ class TelegramRAGBot:
         self.cache = cache
         self.logger = logger
         
+        proxy = get_proxy_url()
+        request = HTTPXRequest(
+            proxy=proxy,
+            httpx_kwargs={"trust_env": False},
+        )
+        get_updates_request = HTTPXRequest(
+            proxy=proxy,
+            httpx_kwargs={"trust_env": False},
+            connection_pool_size=1,
+        )
+
         # Создаем приложение Telegram
-        self.application = Application.builder().token(token).build()
+        self.application = (
+            Application.builder()
+            .token(token)
+            .request(request)
+            .get_updates_request(get_updates_request)
+            .build()
+        )
         
         # Регистрируем обработчики команд
         self.application.add_handler(CommandHandler("start", self.start_command))
@@ -76,8 +101,12 @@ class TelegramRAGBot:
 /logs - получить логи в CSV формате
 
 Просто напишите мне вопрос, и я постараюсь на него ответить!
+
+⚠️ Демо-режим: доступно до {limit} сообщений.
         """
-        await update.message.reply_text(welcome_message.strip())
+        await update.message.reply_text(
+            welcome_message.strip().format(limit=DEMO_MESSAGE_LIMIT)
+        )
     
     async def help_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Обработчик команды /help"""
@@ -87,6 +116,7 @@ class TelegramRAGBot:
 • Просто напишите вопрос - я отвечу на основе базы знаний
 • Использую RAG (Retrieval-Augmented Generation) для точных ответов
 • Ответы кешируются для быстрой работы
+• Демо-режим: до {limit} сообщений на пользователя
 
 Команды:
 /start - начать работу с ботом
@@ -99,7 +129,7 @@ class TelegramRAGBot:
 • "Расскажи про RAG"
 • "Что такое векторные базы данных?"
         """
-        await update.message.reply_text(help_text.strip())
+        await update.message.reply_text(help_text.strip().format(limit=DEMO_MESSAGE_LIMIT))
     
     async def stats_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Обработчик команды /stats"""
@@ -173,6 +203,10 @@ class TelegramRAGBot:
         user = update.effective_user
         user_id = str(user.id)
         username = user.username or user.first_name or "Unknown"
+
+        if self.logger.get_telegram_dialog_count(user_id) >= DEMO_MESSAGE_LIMIT:
+            await update.message.reply_text(DEMO_LIMIT_MESSAGE)
+            return
         
         # Показываем, что бот печатает
         await update.message.chat.send_action(action="typing")
@@ -180,22 +214,30 @@ class TelegramRAGBot:
         start_time = time.time()
         
         try:
-            # Проверяем кеш
+            search_results = []
             cached_answer = self.cache.get(user_message)
             from_cache = cached_answer is not None
-            
+
             if cached_answer:
                 answer = cached_answer
+                search_results = self.rag_assistant.embedding_store.search(
+                    user_message, top_k=3
+                )
             else:
-                # Выполняем RAG запрос
-                answer, _ = self.rag_assistant.generate_response(
+                answer, search_results = self.rag_assistant.generate_response(
                     query=user_message,
                     top_k=3,
-                    verbose=False
+                    verbose=False,
                 )
-                
-                # Сохраняем в кеш
                 self.cache.set(user_message, answer)
+
+            sources_text = format_source_references(
+                search_results,
+                html=bool(os.getenv("DOCS_BASE_URL")),
+            )
+            log_response = answer
+            if sources_text:
+                log_response = f"{answer}\n\n{sources_text}"
             
             # Вычисляем время ответа
             response_time_ms = int((time.time() - start_time) * 1000)
@@ -203,29 +245,32 @@ class TelegramRAGBot:
             # Логируем взаимодействие
             self.logger.log_interaction(
                 query=user_message,
-                response=answer,
+                response=log_response,
                 source="telegram",
                 user_id=user_id,
                 username=username,
                 from_cache=from_cache,
                 response_time_ms=response_time_ms
             )
+            self.logger.increment_telegram_dialog_count(user_id)
             
             # Отправляем ответ пользователю
-            # Разбиваем длинные ответы на части (Telegram имеет лимит 4096 символов)
             max_length = 4000
             if len(answer) <= max_length:
                 await update.message.reply_text(answer)
             else:
-                # Отправляем частями
-                parts = [answer[i:i+max_length] for i in range(0, len(answer), max_length)]
+                parts = [answer[i:i + max_length] for i in range(0, len(answer), max_length)]
                 for i, part in enumerate(parts):
-                    if i == 0:
-                        await update.message.reply_text(part)
-                    else:
-                        await update.message.reply_text(part)
+                    await update.message.reply_text(part)
+
+            if sources_text:
+                parse_mode = ParseMode.HTML if os.getenv("DOCS_BASE_URL") else None
+                await update.message.reply_text(
+                    sources_text,
+                    parse_mode=parse_mode,
+                    disable_web_page_preview=True,
+                )
             
-            # Добавляем индикатор, если ответ из кеша
             if from_cache:
                 await update.message.reply_text("💾 (ответ из кеша)", quote=False)
         
@@ -243,6 +288,7 @@ class TelegramRAGBot:
                 from_cache=False,
                 response_time_ms=int((time.time() - start_time) * 1000)
             )
+            self.logger.increment_telegram_dialog_count(user_id)
     
     def run(self):
         """Запускает бота"""
